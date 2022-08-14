@@ -28,6 +28,12 @@ func findIgnoredTests(pass *analysis.Pass) (interface{}, error) {
 		(*ast.RangeStmt)(nil),
 		(*ast.ForStmt)(nil),
 	}, func(functionNode ast.Node) {
+		//recover panic
+		defer func() {
+			if r := recover(); r != nil {
+				pass.Reportf(functionNode.Pos(), "panic: %s", r)
+			}
+		}()
 		checkAndReportLoop(pass, functionNode)
 	})
 
