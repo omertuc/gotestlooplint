@@ -32,7 +32,7 @@ func findIgnoredTests(pass *analysis.Pass) (interface{}, error) {
 		// recover panic
 		defer func() {
 			if r := recover(); r != nil {
-				pass.Reportf(loopNode.Pos(), "panic: %s", r)
+				pass.Reportf(loopNode.Pos(), "panic: %s\n", r)
 			}
 		}()
 
@@ -89,6 +89,10 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 
 	// Find all usages of the loop variables in the closure
 	ast.Inspect(closure, func(closureDescendantNode ast.Node) bool {
+		if closureDescendantNode == nil {
+			return true
+		}
+
 		if closureDescendantNode.Pos() <= *parallelTokenPos {
 			// This identifier is before the parallel token, so it is allowed to be used in the closure
 			return true
@@ -101,12 +105,12 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 func checkAndReportLoopGinkgo(pass *analysis.Pass, loopNode ast.Node) {
 	loopVarsIdentifiersObjects := getLoopNodeIdentifiersObjects(pass, loopNode)
 
-	runCall := findGinkgoItCalls(pass, getLoopBody(loopNode))
-	if runCall == nil {
+	ginkgoItCall := findGinkgoItCalls(pass, getLoopBody(loopNode))
+	if ginkgoItCall == nil {
 		return
 	}
 
-	closure := getSubtestClosure(runCall)
+	closure := getSubtestClosure(ginkgoItCall)
 	if closure == nil {
 		return
 	}
@@ -183,26 +187,20 @@ func findGinkgoItCalls(pass *analysis.Pass, rootNode ast.Node) *ast.CallExpr {
 		var callIdentifier *ast.Ident
 		switch callExpressionFunction := callExpression.Fun.(type) {
 		case *ast.SelectorExpr:
-			// This is when ginkgo is imported as ginkgo.It
-			switch callExpressionFunctionX := callExpressionFunction.X.(type) {
-			case *ast.Ident:
-				callIdentifier = callExpressionFunctionX
-			default:
-				return true
-			}
+			// This is when ginkgo is imported regularly, i.e. the call looks something like `ginkgo.It`
+			callIdentifier = callExpressionFunction.Sel
 		case *ast.Ident:
-			// This is when ginkgo is imported as wildcard (i.e. simply "It")
+			// This is when ginkgo is imported as wildcard, i.e. the call looks something like `It`
 			callIdentifier = callExpressionFunction
 		default:
 			return true
 		}
 
-		// This is when ginkgo is imported as wildcard
 		if callIdentifier != nil && callIdentifier.Name == "It" && isGinkgoIdentifier(pass, callIdentifier) {
 			matchingCallExpression = callExpression
 			return false
 		}
-		
+
 		return true
 	})
 
