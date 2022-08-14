@@ -28,14 +28,16 @@ func findIgnoredTests(pass *analysis.Pass) (interface{}, error) {
 	pass.ResultOf[inspect.Analyzer].(*inspector.Inspector).Preorder([]ast.Node{
 		(*ast.RangeStmt)(nil),
 		(*ast.ForStmt)(nil),
-	}, func(functionNode ast.Node) {
-		//recover panic
+	}, func(loopNode ast.Node) {
+		// recover panic
 		defer func() {
 			if r := recover(); r != nil {
-				pass.Reportf(functionNode.Pos(), "panic: %s", r)
+				pass.Reportf(loopNode.Pos(), "panic: %s", r)
 			}
 		}()
-		checkAndReportLoop(pass, functionNode)
+
+		checkAndReportLoop(pass, loopNode)
+		checkAndReportLoopGinkgo(pass, loopNode)
 	})
 
 	return nil, nil
@@ -62,17 +64,20 @@ func isParallelFunctionClosure(pass *analysis.Pass, closure *ast.FuncLit) *token
 	return nil
 }
 
+func getLoopNodeIdentifiersObjects(pass *analysis.Pass, loopNode ast.Node) []types.Object {
+	return slices.Map(getLoopVarsIdentifiers(loopNode), pass.TypesInfo.ObjectOf)
+}
+
 func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
-	loopVarsIdentifiersObjects := slices.Map(getLoopVarsIdentifiers(loopNode),
-		pass.TypesInfo.ObjectOf)
+	loopVarsIdentifiersObjects := getLoopNodeIdentifiersObjects(pass, loopNode)
 
 	runCall := findTestingTCalls(pass, getLoopBody(loopNode), "Run")
 	if runCall == nil {
 		return
 	}
 
-	closure, ok := runCall.Args[1].(*ast.FuncLit)
-	if !ok {
+	closure := getSubtestClosure(runCall)
+	if closure == nil {
 		return
 	}
 
@@ -84,22 +89,57 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 
 	// Find all usages of the loop variables in the closure
 	ast.Inspect(closure, func(closureDescendantNode ast.Node) bool {
-		if identifier, ok := closureDescendantNode.(*ast.Ident); ok {
-			// Compare against all loop variable objects
-			identifierObject := pass.TypesInfo.ObjectOf(identifier)
-			if slices.Any(loopVarsIdentifiersObjects, func(loopVarObject types.Object) bool {
-				return identifierObject == loopVarObject
-			}) {
-				if identifier.Pos() > *parallelTokenPos {
-					// Report if the identifier's object matches a loop var object
-					name := identifier.Name
-					pass.Reportf(identifier.Pos(), goTestFailureMessageFormat, name, name)
-				}
-			}
+		if closureDescendantNode.Pos() <= *parallelTokenPos {
+			// This identifier is before the parallel token, so it is allowed to be used in the closure
+			return true
 		}
 
-		return true
+		return checkAndReportLoopIdentifierObject(pass, loopVarsIdentifiersObjects, closureDescendantNode, goTestFailureMessageFormat)
 	})
+}
+
+func checkAndReportLoopGinkgo(pass *analysis.Pass, loopNode ast.Node) {
+	loopVarsIdentifiersObjects := getLoopNodeIdentifiersObjects(pass, loopNode)
+
+	runCall := findGinkgoItCalls(pass, getLoopBody(loopNode))
+	if runCall == nil {
+		return
+	}
+
+	closure := getSubtestClosure(runCall)
+	if closure == nil {
+		return
+	}
+
+	// Find all usages of the loop variables in the closure
+	ast.Inspect(closure, func(closureDescendantNode ast.Node) bool {
+		return checkAndReportLoopIdentifierObject(pass, loopVarsIdentifiersObjects, closureDescendantNode, ginkgoFailureMessageFormat)
+	})
+}
+
+func getSubtestClosure(runCall *ast.CallExpr) *ast.FuncLit {
+	closure, ok := runCall.Args[1].(*ast.FuncLit)
+	if !ok {
+		return nil
+	}
+	return closure
+}
+
+func checkAndReportLoopIdentifierObject(pass *analysis.Pass, loopVarsIdentifiersObjects []types.Object, node ast.Node, message string) bool {
+	if identifier, ok := node.(*ast.Ident); ok {
+		// Compare against all loop variable objects
+		identifierObject := pass.TypesInfo.ObjectOf(identifier)
+
+		if slices.Any(loopVarsIdentifiersObjects, func(loopVarObject types.Object) bool {
+			return identifierObject == loopVarObject
+		}) {
+			name := identifier.Name
+			pass.Reportf(identifier.Pos(), message, name, name)
+			return false
+		}
+	}
+
+	return true
 }
 
 // Scans a tree for method calls t.<methodName>() calls where t is the test context (t *testing.T)
@@ -128,4 +168,48 @@ func findTestingTCalls(pass *analysis.Pass, rootNode ast.Node, methodName string
 	})
 
 	return matchingCallExpression
+}
+
+// Scans a tree for Ginkgo It method calls
+func findGinkgoItCalls(pass *analysis.Pass, rootNode ast.Node) *ast.CallExpr {
+	var matchingCallExpression *ast.CallExpr
+
+	ast.Inspect(rootNode, func(descendantNode ast.Node) bool {
+		callExpression, ok := descendantNode.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		var callIdentifier *ast.Ident
+		switch callExpressionFunction := callExpression.Fun.(type) {
+		case *ast.SelectorExpr:
+			// This is when ginkgo is imported as ginkgo.It
+			switch callExpressionFunctionX := callExpressionFunction.X.(type) {
+			case *ast.Ident:
+				callIdentifier = callExpressionFunctionX
+			default:
+				return true
+			}
+		case *ast.Ident:
+			// This is when ginkgo is imported as wildcard (i.e. simply "It")
+			callIdentifier = callExpressionFunction
+		default:
+			return true
+		}
+
+		// This is when ginkgo is imported as wildcard
+		if callIdentifier != nil && callIdentifier.Name == "It" && isGinkgoIdentifier(pass, callIdentifier) {
+			matchingCallExpression = callExpression
+			return false
+		}
+		
+		return true
+	})
+
+	return matchingCallExpression
+}
+
+func isGinkgoIdentifier(pass *analysis.Pass, identifier *ast.Ident) bool {
+	packagePath := pass.TypesInfo.ObjectOf(identifier).Pkg().Path()
+	return packagePath == "github.com/onsi/ginkgo/v2" || packagePath == "github.com/onsi/ginkgo"
 }
