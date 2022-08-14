@@ -25,21 +25,13 @@ var Analyzer = &analysis.Analyzer{
 
 func findIgnoredTests(pass *analysis.Pass) (interface{}, error) {
 	pass.ResultOf[inspect.Analyzer].(*inspector.Inspector).Preorder([]ast.Node{
-		(*ast.FuncDecl)(nil),
+		(*ast.RangeStmt)(nil),
+		(*ast.ForStmt)(nil),
 	}, func(functionNode ast.Node) {
-		checkFunction(pass, functionNode.(*ast.FuncDecl))
+		checkAndReportLoop(pass, functionNode)
 	})
 
 	return nil, nil
-}
-
-func isLoop(functionNode ast.Node) bool {
-	switch functionNode.(type) {
-	case *ast.ForStmt, *ast.RangeStmt:
-		return true
-	default:
-		return false
-	}
 }
 
 func checkFunction(pass *analysis.Pass, functionDeclaration *ast.FuncDecl) {
@@ -51,30 +43,18 @@ func checkFunction(pass *analysis.Pass, functionDeclaration *ast.FuncDecl) {
 		// A method that happens to be named Test<Something> is not a test
 		return
 	}
-
-	testingTObject := pass.TypesInfo.ObjectOf(functionDeclaration.Type.Params.List[0].Names[0])
-
-	// Look for loops inside the test function
-	ast.Inspect(functionDeclaration.Body, func(functionBodyDescendantNode ast.Node) bool {
-		if isLoop(functionBodyDescendantNode) {
-			checkAndReportLoop(pass, functionBodyDescendantNode, testingTObject)
-		}
-
-		return true
-	})
 }
 
 func isParallelFunctionClosure(pass *analysis.Pass, closure *ast.FuncLit) bool {
 	// Closure test
-	closureTestingTObject := pass.TypesInfo.ObjectOf(closure.Type.Params.List[0].Names[0])
-	return findTestingTCalls(pass, closure.Body, closureTestingTObject, "Parallel") != nil
+	return findTestingTCalls(pass, closure.Body, "Parallel") != nil
 }
 
-func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node, testingTObject types.Object) {
+func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 	loopVarsIdentifiersObjects := slices.Map(getLoopVarsIdentifiers(loopNode),
 		pass.TypesInfo.ObjectOf)
 
-	runCall := findTestingTCalls(pass, getLoopBody(loopNode), testingTObject, "Run")
+	runCall := findTestingTCalls(pass, getLoopBody(loopNode), "Run")
 	if runCall == nil {
 		return
 	}
@@ -108,9 +88,7 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node, testingTObject t
 }
 
 // Scans a tree for method calls t.<methodName>() calls where t is the test context (t *testing.T)
-func findTestingTCalls(pass *analysis.Pass, rootNode ast.Node,
-	testingTObject types.Object, methodName string,
-) *ast.CallExpr {
+func findTestingTCalls(pass *analysis.Pass, rootNode ast.Node, methodName string) *ast.CallExpr {
 	var matchingCallExpression *ast.CallExpr
 
 	ast.Inspect(rootNode, func(descendantNode ast.Node) bool {
@@ -123,7 +101,7 @@ func findTestingTCalls(pass *analysis.Pass, rootNode ast.Node,
 		case *ast.SelectorExpr:
 			switch callExpressionFunctionX := callExpressionFunction.X.(type) {
 			case *ast.Ident:
-				if pass.TypesInfo.ObjectOf(callExpressionFunctionX) == testingTObject &&
+				if pass.TypesInfo.ObjectOf(callExpressionFunctionX).Type().String() == "*testing.T" &&
 					callExpressionFunction.Sel.Name == methodName {
 					matchingCallExpression = callExpression
 					return false
