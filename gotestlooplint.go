@@ -64,10 +64,10 @@ func checkFunction(pass *analysis.Pass, functionDeclaration *ast.FuncDecl) {
 	})
 }
 
-func isParallelFunctionClosure(pass *analysis.Pass,
-	closure *ast.FuncLit, testObject types.Object,
-) bool {
-	return findTestingTCalls(pass, closure.Body, testObject, "Parallel") != nil
+func isParallelFunctionClosure(pass *analysis.Pass, closure *ast.FuncLit) bool {
+	// Closure test
+	closureTestingTObject := pass.TypesInfo.ObjectOf(closure.Type.Params.List[0].Names[0])
+	return findTestingTCalls(pass, closure.Body, closureTestingTObject, "Parallel") != nil
 }
 
 func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node, testingTObject types.Object) {
@@ -85,20 +85,18 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node, testingTObject t
 	}
 
 	// Check if this is a parallel closure
-	if !isParallelFunctionClosure(pass, closure, testingTObject) {
+	if !isParallelFunctionClosure(pass, closure) {
 		return
 	}
 
 	// Find all usages of the loop variables in the closure
 	ast.Inspect(closure, func(closureDescendantNode ast.Node) bool {
-		identifier, ok := closureDescendantNode.(*ast.Ident)
-		if !ok {
-			return true
-		}
-
-		// Compare against all loop variable objects
-		for _, loopVarObject := range loopVarsIdentifiersObjects {
-			if pass.TypesInfo.ObjectOf(identifier) == loopVarObject {
+		if identifier, ok := closureDescendantNode.(*ast.Ident); ok {
+			// Compare against all loop variable objects
+			identifierObject := pass.TypesInfo.ObjectOf(identifier)
+			if slices.Any(loopVarsIdentifiersObjects, func(loopVarObject types.Object) bool {
+				return identifierObject == loopVarObject
+			}) {
 				// Report if the identifier's object matches a loop var object
 				name := identifier.Name
 				pass.Reportf(identifier.Pos(), goTestFailureMessageFormat, name, name)
@@ -132,6 +130,7 @@ func findTestingTCalls(pass *analysis.Pass, rootNode ast.Node,
 				}
 			}
 		}
+
 		return true
 	})
 
