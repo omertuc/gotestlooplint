@@ -2,6 +2,7 @@ package gotestlooplint
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -51,9 +52,14 @@ func checkFunction(pass *analysis.Pass, functionDeclaration *ast.FuncDecl) {
 	}
 }
 
-func isParallelFunctionClosure(pass *analysis.Pass, closure *ast.FuncLit) bool {
+func isParallelFunctionClosure(pass *analysis.Pass, closure *ast.FuncLit) *token.Pos {
 	// Closure test
-	return findTestingTCalls(pass, closure.Body, "Parallel") != nil
+	if parallelCall := findTestingTCalls(pass, closure.Body, "Parallel"); parallelCall != nil {
+		parallelCallPos := parallelCall.Pos()
+		return &parallelCallPos
+	}
+
+	return nil
 }
 
 func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
@@ -71,7 +77,8 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 	}
 
 	// Check if this is a parallel closure
-	if !isParallelFunctionClosure(pass, closure) {
+	parallelTokenPos := isParallelFunctionClosure(pass, closure)
+	if parallelTokenPos == nil {
 		return
 	}
 
@@ -83,9 +90,11 @@ func checkAndReportLoop(pass *analysis.Pass, loopNode ast.Node) {
 			if slices.Any(loopVarsIdentifiersObjects, func(loopVarObject types.Object) bool {
 				return identifierObject == loopVarObject
 			}) {
-				// Report if the identifier's object matches a loop var object
-				name := identifier.Name
-				pass.Reportf(identifier.Pos(), goTestFailureMessageFormat, name, name)
+				if identifier.Pos() > *parallelTokenPos {
+					// Report if the identifier's object matches a loop var object
+					name := identifier.Name
+					pass.Reportf(identifier.Pos(), goTestFailureMessageFormat, name, name)
+				}
 			}
 		}
 
